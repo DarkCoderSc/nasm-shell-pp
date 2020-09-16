@@ -6,7 +6,14 @@ Just enter your bunch of assembly instructions and generate the final payload (c
 
 ## Help Menu
 
-![Help Menu](https://i.imgur.com/rED74mT.png)
+* `:help` -> Display this menu.
+* `:exit` -> Close this application.
+* `:assembly` -> Dump session assembly instructions.
+* `:shellcode` -> Generate output shellcode (Python / C / CPP formatted).
+* `:dlast` -> Delete last instruction.
+* `:delete` -> Delete instruction at specified index (prompted).
+* `:update` -> Update instruction at specified index (prompted).
+* `:reset` -> Clear instructions. Restart from scratch.
 
 ## In Action
 
