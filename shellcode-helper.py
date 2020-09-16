@@ -86,6 +86,7 @@ def display_help():
 	print(f"\t {tcolors.blue}:dlast{tcolors.clear} -> Delete last instruction.")
 	print(f"\t {tcolors.blue}:delete{tcolors.clear} -> Delete instruction at specified index (prompted).")
 	print(f"\t {tcolors.blue}:update{tcolors.clear} -> Update instruction at specified index (prompted).")
+	print(f"\t {tcolors.blue}:reset{tcolors.clear} -> Clear instructions. Restart from scratch.")
 
 	print("\n")
 
@@ -199,6 +200,12 @@ if __name__ == "__main__":
 					proc.close()
 
 				break
+			elif (command == "reset"):
+				count = len(instructions)
+
+				instructions.clear()
+
+				success(f"{count} instructions cleared.")
 			elif (command == "help"):
 				display_help()
 			elif (command == "assembly"):
