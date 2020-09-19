@@ -1,0 +1,859 @@
+#!/usr/bin/python3
+
+'''
+
+	Jean-Pierre LESUEUR (@DarkCoderSc)
+	https://www.twitter.com/darkcodersc
+	https://github.com/DarkCoderSc
+	https://www.linkedin.com/in/jlesueur/
+
+	https://www.phrozen.io/
+
+	Version: 1.0
+
+	Description:
+		Impove Metasploit Nasm Shell Tool for Exploit Development Purpose.
+
+	TODO: 
+		- Support Arrow Keys.		
+		- Cursor to insert instruction at given position.	
+		- Exploit templating
+
+		- Update opcode in Instruction() class to be bytearray instead of string.
+		  Then update whole code to support opcode as bytearray instead of string.
+		  This would avoid bloating code with fastidious stuff.
+
+'''
+
+import subprocess
+import pexpect
+import sys
+import os.path
+
+from textwrap import wrap
+from collections import defaultdict
+from os import path
+
+nasm_shell_location = "/usr/bin/msf-nasm_shell" # Update the location of your Nasm Shell if required!
+ro = False
+
+proc = None
+instructions = list()
+commands = list()
+badchars = bytearray([0x00]) # Default
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Command Class
+	
+-------------------------------------------------------------------------------------------------------
+'''
+
+class Command:
+	def __init__(self, name, description, argument = "", optional_arg = False):
+		self.name = name
+		self.description = description		
+		self.argument = argument
+		self.optional_arg = optional_arg
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Terminal Colors Class
+
+-------------------------------------------------------------------------------------------------------
+'''
+
+class tcolors:
+	clear = "\033[0m"
+	green = "\033[32m"
+	red = "\033[31m"
+	yellow = "\033[33m"
+	blue = "\033[34m"
+	gray = "\033[90m"
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Define Custom Loggers (Template)
+	
+-------------------------------------------------------------------------------------------------------
+'''
+
+def success(message):
+    print(f"[\033[32m✓\033[39m] {message}")
+
+def error(message):
+    print(f"\033[31m{message}\033[39m")
+
+def warning(message):
+	print(f"\033[33m{message}\033[39m")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Instruction Class
+	
+-------------------------------------------------------------------------------------------------------
+'''
+class Instruction:
+	def __init__(self, asm, opcodes):
+		self.asm = asm
+		self.opcodes = opcodes
+		self.update_size()
+
+	def update_size(self):
+		self.size = int(len(self.opcodes) / 4)
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Get Instruction Object from Index
+
+-------------------------------------------------------------------------------------------------------
+'''
+def get_instruction(index):
+	if (index == 0) or (index > (len(instructions))):
+		error("Index is out of bound.")
+
+		return None
+
+	index -= 1
+
+	return instructions[index]
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Delete Buffer Instruction at Index.
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def delete_instruction(index):
+	obj = get_instruction(index)
+	if (obj == None):
+		return False
+
+	index -= 1
+
+	instructions.pop(index)
+
+	success(f"Instruction at index N°{index+1} \"{tcolors.blue}{obj.asm}{tcolors.clear}\" was successfully deleted.")
+
+	return True
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Return Shellcode Size
+
+-------------------------------------------------------------------------------------------------------
+'''
+def get_shellcode_size():
+	size = 0
+	for obj in instructions:
+		size += obj.size
+
+	return size
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Byte String to Byte Array (Ex: \\x00\\x01\\x02)
+
+	//
+
+	Byte Array to Byte String
+
+-------------------------------------------------------------------------------------------------------
+'''
+def bytestr_to_bytearr(data):
+	return list(bytearray.fromhex(data.replace("\\x", " ")))
+
+
+def bytearr_to_bytestr(data):
+	return ''.join(f"\\x{'{:02x}'.format(x)}" for x in data)
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Perform assembly translation through NASM Shell and insert if we are in writable mode in Instruction
+	Buffer (or update).
+
+-------------------------------------------------------------------------------------------------------
+'''
+def process_nasm_shell(instruction, update_index = -1):
+	instruction = instruction.strip()
+
+	if not instruction:
+		return False
+
+	# Ignore line comments
+	if instruction[0:1] == ";":
+		return False
+
+	proc.sendline(instruction)
+
+	proc.expect(expected_token)
+
+	output = proc.before.decode("utf-8").rstrip()
+
+	lines = output.split("\n")
+
+	# Handle NASM Shell Errors
+	if "warning:" in output:
+		lines.pop(0)
+		output = "\n".join(lines)
+		warning(output)
+
+		return False
+
+	if "Error:" in output:
+		lines.pop(0)
+		output = "\n".join(lines)
+		error(output)
+		
+		return False
+
+	# Retrieve generated opcodes
+	opcodes = wrap(lines[1][10:].split(' ')[0], 2)
+
+	formated_opcodes = ""
+	for opcode in opcodes:
+		formated_opcodes += f"\\x{opcode}"
+
+
+	# Update or Insert new instruction in instruction buffer	
+	obj = None
+	if (update_index != -1):
+		update_index -= 1
+
+		obj = instructions[update_index]
+		obj.asm = instruction
+		obj.opcodes = formated_opcodes
+		obj.update_size()
+	else:		
+		obj = Instruction(instruction, formated_opcodes)
+
+		if not ro:			
+			instructions.append(obj)
+
+	# Pretty Message (Ack)
+	if not ro or (update_index != -1):
+		prefix = f"{tcolors.green}+{tcolors.clear}"
+	else:
+		prefix = f"{tcolors.yellow}!{tcolors.clear}"
+
+	print(f"[{prefix}] {tcolors.blue}{obj.asm}{tcolors.clear} ({tcolors.blue}{obj.opcodes}{tcolors.clear}), Size: {tcolors.blue}{obj.size}{tcolors.clear} Bytes")
+
+	return True
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Return full shellcode from instruction buffer (formated string)
+
+-------------------------------------------------------------------------------------------------------
+'''
+def get_shellcode():
+	output = ""		
+	for obj in instructions:
+		output += obj.opcodes
+
+	return output
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Dump data to Terminal
+
+-------------------------------------------------------------------------------------------------------
+'''
+def dump(data):
+	print('\n--- BEGIN DUMP ---')
+	print(data.strip())
+	print('--- END DUMP ---\n')
+
+	print(f"Shellcode Size: {tcolors.blue}{get_shellcode_size()}{tcolors.clear} Bytes\n")
+
+	if badchars:
+		shellcode = bytestr_to_bytearr(get_shellcode())
+
+		badchars_found = bytearray()
+
+		for b in shellcode:
+			if b in badchars:
+				badchars_found.append(b)
+
+		if len(badchars_found) > 0:
+			print(f"{tcolors.yellow}Warning:{tcolors.clear} {len(badchars_found)} bad characters found: \"{tcolors.red}{bytearr_to_bytestr(badchars_found)}{tcolors.clear}\"\n")
+
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	Return Assembly Instruction Buffer (Numbered or not)
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def get_assembly_instructions(numbered = False):
+	output = ""
+	for index, instruction in enumerate(instructions):
+		if numbered:
+			output += f"{index+1} - "
+
+		output += f"{instruction.asm}\n"
+
+	return output.strip()
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Display Help Menu
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_help():
+	print(f'\nShellcode Helper ({tcolors.blue}@DarkCoderSc{tcolors.clear})\n')	
+
+	cmd_max_length = 0
+	for command in commands:
+		if len(command.name) > cmd_max_length:
+			cmd_max_length = len(command.name)
+
+	arg_max_length = 0
+	for command in commands:
+		if len(command.argument) > arg_max_length:
+			arg_max_length = len(command.argument)
+	
+	cmd_max_length += 1 
+	arg_max_length += 3 # < >
+
+	for command in commands:
+		argument = ""
+		if command.argument:
+			argument = f" <{command.argument}>"
+
+		formated_name = f"{command.name}".ljust(cmd_max_length, " ") 
+		formated_name += " "
+		formated_name += f"{argument}".ljust(arg_max_length, " ")
+		formated_name += " "
+
+		print(f"\t{tcolors.blue}:{formated_name}{tcolors.clear} : {command.description}")
+
+	print("\n")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Terminate Program (Exit)
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_exit():
+	if len(instructions) > 0:
+		print(f"You have {tcolors.blue}{len(instructions)}{tcolors.clear} instructions in your assembly instruction buffer.)")
+		print(f"Do you wan''t to export to shellcode format before exiting? (Yes({tcolors.blue}y{tcolors.clear}), No({tcolors.blue}n{tcolors.clear}), Cancel({tcolors.blue}c{tcolors.clear}))")
+
+		while True:
+			print("\nAnswer > ", end="")
+			stdin = input().upper()
+
+			if stdin == "Y":
+				m_shellcode()
+			elif stdin == "N":
+				break
+			elif stdin == "C":
+				return
+			else:
+				print(f"{tcolors.red}Invalid Option{tcolors.clear}: Yes(y), No(n), Cancel(c).")
+
+				continue
+
+			break
+
+	if proc:
+		proc.close()
+
+	sys.exit(0)
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Reset Instruction Buffer
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_reset():
+	count = len(instructions)
+
+	if count > 0:	
+		instructions.clear()
+
+		success(f"Instruction buffer cleared. {count} instruction(s) were deleted.")
+	else:
+		warning("You don't have any instruction in your instruction buffer.")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Dump Instruction Buffer as Shellcode Formated String (Python / C / CPP)
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_shellcode():
+	if len(instructions) > 0:			
+		shellcode = get_shellcode()
+
+		if not badchars:
+			output = f"{tcolors.blue}{shellcode}{tcolors.clear}"
+		else:
+			output = ""
+			for b in bytestr_to_bytearr(shellcode):
+				opcode = f"\\x{'{:02x}'.format(b)}"
+
+				if b in badchars:				
+					color = tcolors.red
+				else:
+					color = tcolors.blue
+					
+				output += f"{color}{opcode}{tcolors.clear}"
+
+		dump(output)
+	else:
+		warning("You don't have any instruction in your instruction buffer.")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Dump Instruction Buffer (Assembly Instructions)
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_assembly():
+	if len(instructions) > 0:
+		output = get_assembly_instructions()
+
+		if not badchars:
+			dump(f"{tcolors.blue}{output}{tcolors.clear}")
+		else:
+			output = ""
+			for instruction in instructions:
+				badchars_found = bytearray()
+				for b in bytestr_to_bytearr(instruction.opcodes):
+					if b in badchars:
+						badchars_found.append(b)					
+
+				comment = ""
+				if len(badchars_found) > 0:
+					color = tcolors.red
+					comment = f" ; bad characters: \"{bytearr_to_bytestr(badchars_found)}\""
+				else:
+					color = tcolors.blue
+
+
+				output += f"{color}{instruction.asm}{comment}{tcolors.clear}\n"
+
+			dump(output)
+
+	else:
+		warning("You don't have any instruction in your instruction buffer.")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Delete Last Buffer Instruction
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_dlast():
+	delete_instruction(len(instructions))
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Delete Buffer Instruction defined by it Index
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_delete():
+	output = get_assembly_instructions(True)
+
+	print("Instruction Buffer (Indexed):\n")
+
+	print(output)
+
+	while True:
+		print(f"Delete Item at Index (Cancel({tcolors.blue}c{tcolors.clear})) > ", end="")
+
+		stdin = input()
+		if stdin.lower() == "c":
+			break
+
+		if stdin.isnumeric():
+			if delete_instruction(int(stdin)):
+				break
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Set instruction buffer to Read Only mode
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_r():
+	global ro
+
+	if ro == False:
+		ro = True
+
+		success("Instruction Buffer is now set to read only. Future instruction won't be saved.")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Set instruction buffer to Writable mode
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_w():
+	global ro
+
+	if ro == True:
+		ro = False
+
+		success("Instruction Buffer is now set to writable. Future instruction will be saved.")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Clear Terminal Screen
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_clear():
+	subprocess.call("clear", shell=True)
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Load Assembly File
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_load(arg):
+	if not arg:
+		return
+
+	try:
+		with open(arg) as file:
+			lines = file.readlines()
+
+			for line in lines:			
+				process_nasm_shell(line)
+	except FileNotFoundError:
+		error(f"Could not open file: \"{arg}\".")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Dump assembly instruction opcode to python formated variable
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_pyvar(arg):
+	if not arg:
+		return
+
+	output = f"{arg} = b\"\"\n"
+
+	opcodes = ""
+	for obj in instructions:
+		opcodes += obj.opcodes
+
+	chunks = wrap(opcodes, 64)
+	
+	for chunk in chunks:
+		output += f"{arg} += b\"{chunk}\"\n"
+
+	print(f"\n{output}\n")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Update Instruction from Instruction Buffer
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_update():
+	output = get_assembly_instructions(True)
+
+	print("Instruction Buffer (Indexed):\n")
+
+	print(output)
+
+	while True:
+		print(f"Update Item at Index (Cancel({tcolors.blue}c{tcolors.clear})) > ", end="")
+
+		stdin = input()
+		if stdin.lower() == "c":
+			break		
+
+		if stdin.isnumeric():
+			index = int(stdin)
+
+			obj = get_instruction(index)
+			if (obj == None):
+				return False
+
+			while True:
+				print(f"Replace \"{tcolors.blue}{obj.asm}{tcolors.clear}\" with (Cancel({tcolors.blue}c{tcolors.clear})) > ", end="")
+
+				stdin = input()
+				if stdin.lower() == "c":
+					break
+
+				if process_nasm_shell(stdin, index):
+					break
+
+			break
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Execute Shell Commands
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_shell(arg):
+	if not arg:
+		return
+
+	command = arg.split()
+	
+	try:
+		proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+		stdout, stderr = proc.communicate()
+	except Exception as e:
+		error(f"Error while running command with error: \"{str(e)}\"")
+
+		return
+
+	if stdout:
+		print(f"\n{stdout.decode('utf-8')}")
+
+	if stderr:
+		error(f"\n{stderr.decode('utf-8')}\n")
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: Set bad characters list.
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_badchars(arg):
+	global badchars
+
+	if not arg:
+		badchars = None
+
+		return
+
+	try:
+		badchars = bytestr_to_bytearr(arg)
+
+		success(f"{len(badchars)} bad characters set (\"{tcolors.blue}{arg}{tcolors.clear}\").")
+	except:
+		error("Invalid hex string format. Ex: \"\\x00\\x01\\x02\"")
+
+
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+	@method: List bad characters
+	
+-------------------------------------------------------------------------------------------------------
+'''
+def m_lsbadchars():
+	if badchars:
+		output = bytearr_to_bytestr(badchars)
+
+		print(f"\n{tcolors.blue}{output}{tcolors.clear}\n")
+	else:
+		warning("No bad characters are currently set.")
+	
+
+'''
+-------------------------------------------------------------------------------------------------------
+
+ 	-= Entry Point =-
+
+-------------------------------------------------------------------------------------------------------
+'''
+
+if __name__ == "__main__":
+	print(f"\nNASM Shell{tcolors.blue}++{tcolors.clear} v1.0")
+
+	if not path.exists(nasm_shell_location):
+		error(f"NASM Shell (Metasploit Framework) application not found. NASM Shell location is currently set to \"{nasm_shell_location}\".")
+
+		sys.exit(1)
+
+
+	#
+	# Define Commands
+	#
+
+	cmd = Command("help", "Display help menu (This menu).")
+	cmd.method = m_help
+	commands.append(cmd)
+
+	cmd = Command("clear", "Clear Terminal Screen.")
+	cmd.method = m_clear
+	commands.append(cmd)
+
+	cmd = Command("exit", "Terminate application.")
+	cmd.method = m_exit
+	commands.append(cmd)
+
+	cmd = Command("badchars", "Set characters you want to avoid in your shellcode. Highlight them in red. (Ex: \"\\x01\\x02\\x03\")", "badchars", True)
+	cmd.method = m_badchars
+	commands.append(cmd)
+
+	cmd = Command("ls_badchars", "List bad characters.")
+	cmd.method = m_lsbadchars
+	commands.append(cmd)
+
+	cmd = Command("assembly", "Dump saved assembly instructions (current session).")
+	cmd.method = m_assembly
+	commands.append(cmd)
+
+	cmd = Command("shellcode", "Output shellcode version from assembly instructions (Python / C / CPP Formated String)")
+	cmd.method = m_shellcode
+	commands.append(cmd)
+
+	cmd = Command("pyvar", "Output shellcode version from assembly instructions to python formated variable.", "var_name")
+	cmd.method = m_pyvar
+	commands.append(cmd)
+
+	cmd = Command("dlast", "Remove latest saved instruction.")
+	cmd.method = m_dlast
+	commands.append(cmd)
+
+	cmd = Command("delete", "Delete saved instruction at defined index.")
+	cmd.method = m_delete
+	commands.append(cmd)
+
+	cmd = Command("update", "Update saved instruction at defined index.")
+	cmd.method = m_update
+	commands.append(cmd)
+
+	cmd = Command("reset", f"Delete saved instructions. Reset/Clear instruction buffer ({tcolors.yellow}/!\\{tcolors.clear} Can't be undo).")
+	cmd.method = m_reset
+	commands.append(cmd)
+
+	cmd = Command("load", "Load assembly file from disk.", "filename")
+	cmd.method = m_load
+	commands.append(cmd)
+
+	cmd = Command("r", "Read Only. Instructions are not saved to instruction buffer.")
+	cmd.method = m_r
+	commands.append(cmd)
+
+	cmd = Command("w", "Write mode. Instructions are saved to instruction buffer.")
+	cmd.method = m_w
+	commands.append(cmd)
+
+	cmd = Command("!", f"Execute shell command. Ex: \":!ls -ltr /var/log\"", "command")
+	cmd.method = m_shell
+	commands.append(cmd)
+
+
+	#
+	# Start NASM Shell
+	#
+
+	print(f"\nEnter \"{tcolors.blue}:help{tcolors.clear}\" to display available commands.\n")
+
+	expected_token = "\\033\[1mnasm\\033\[0m >"
+
+	proc = pexpect.spawn(nasm_shell_location)
+
+	proc.expect(expected_token)	
+
+	#
+	# Command Parser
+	#
+
+	while True:
+		if ro:
+			mode = f"{tcolors.yellow}read{tcolors.clear}"
+		else:
+			mode = f"{tcolors.green}write{tcolors.clear}"
+
+		print(f"nasm({mode}) > ", end='')
+
+		stdin = input()
+		if not stdin:
+			continue
+
+		# Handle NASM Shell exit (Alias)
+		if stdin == "exit":
+			stdin = ":exit"
+
+		# Process Command
+		if stdin[0] == ":":
+			found = False
+
+			for command in commands:
+				if not hasattr(command, "method"):
+					continue
+
+				if (command.method.__code__.co_argcount == 0):
+					if stdin[1:] == command.name:
+						found = True
+
+						command.method()
+				else:
+					if stdin[1:len(command.name)+1] == (command.name):
+						arg = stdin[len(command.name)+1:].strip()
+
+						found = True					
+
+						if arg or command.optional_arg:
+							command.method(arg)										
+						else:
+							error("This command requires an argument. Check help menu for more details.")
+
+			if not found:
+				error("Command not found. Check help menu for available commands.")
+
+		else:					
+			process_nasm_shell(stdin)
