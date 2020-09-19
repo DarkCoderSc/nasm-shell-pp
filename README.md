@@ -27,8 +27,11 @@ Supports bad characters detection.
 :!             <command>   : Execute shell command. Ex: ":!ls -ltr /var/log"
 ```
 
+## Screenshots
 
+![Load file](https://i.imgur.com/KLS6nY1.png)
 
+![Export as Shellcode](https://i.imgur.com/VxVmTKL.png)
 
 
 
